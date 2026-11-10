@@ -1,0 +1,10 @@
+services:
+  immobiliare-it-scraper:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      # Optional — a proxy keeps steady high volume past immobiliare.it's DataDome checks.
+      # - IMMOBILIARE_IT_PROXY=http://user:pass@host:port
