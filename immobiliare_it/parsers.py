@@ -685,6 +685,7 @@ def _auction(auction):
         return None
     state = auction.get("saleState") if isinstance(auction.get("saleState"), dict) else {}
     lot = auction.get("lotCategory") if isinstance(auction.get("lotCategory"), dict) else {}
+    register = auction.get("auctionRegister")       # {"id": 2, "name": "Civil real estate applications"} on live pages
     return {
         "sale_date": _us_date(auction.get("saleDateValue") or auction.get("saleDate")),
         "sale_datetime_label": _clean(auction.get("saleDate")),
@@ -700,7 +701,7 @@ def _auction(auction):
         "procedure_number": _clean(auction.get("procedureNumber")),
         "lot_category": _clean(lot.get("name")),
         "lots_count": _int(auction.get("totalLotEstates")),
-        "court": _clean(auction.get("auctionRegister")),
+        "court": _clean(register.get("name")) if isinstance(register, dict) else _clean(register),
         "has_booked_debt_expenses": _yes_no(auction.get("expenseBookedDebt")),
         "contribution_not_due": _yes_no(auction.get("contributionNotDue")),
     }

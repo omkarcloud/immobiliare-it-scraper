@@ -126,7 +126,7 @@ class ImmobiliareItNotFound(NotFound):
 _local = threading.local()
 _block_lock = threading.Lock()
 _blocked_until = 0.0     # new sessions ride the fallback exit until then
-_direct_blocks = []      # monotonic times of recent blocks on the direct tier
+_direct_blocks = []      # (monotonic time, identity) of recent blocks on the direct tier, one per identity
 _profile_index = 0       # the ladder's current identity (shared by every thread)
 
 
@@ -215,7 +215,9 @@ def _drop_session(blocked=False):
     if proxy is None and hold and config.immobiliare_it_fallback_proxy() is not None:
         now = time.monotonic()
         with _block_lock:
-            _direct_blocks[:] = [t for t in _direct_blocks if now - t < hold] + [now]
+            # one entry per refused identity: several threads refused on the
+            # same identity are one refusal, not a walk through the ladder
+            _direct_blocks[:] = [(t, p) for t, p in _direct_blocks if now - t < hold and p != profile] + [(now, profile)]
             if len(_direct_blocks) >= len(_PROFILES):
                 _blocked_until = now + hold
                 _direct_blocks.clear()

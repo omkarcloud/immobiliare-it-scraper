@@ -183,6 +183,13 @@ def test_detail_rent_and_auction():
     assert auction["auction"]["published_at"] == "2026-10-14" and auction["auction"]["lots_count"] == 1
 
 
+def test_auction_register_is_its_name():
+    # live auction pages carry the register as an object; it once leaked as a Python dict string
+    assert P._auction({"auctionRegister": {"id": 2, "name": "Civil real estate applications"}})["court"] == "Civil real estate applications"
+    assert P._auction({"auctionRegister": "Tribunale di Roma"})["court"] == "Tribunale di Roma"
+    assert P._auction({})["court"] is None
+
+
 def test_detail_other_language():
     de = P.parse_detail(P.next_data(fixture("detail_de_128951952.html")), "de")
     assert de["id"] == 128951952 and de["link"] == "https://www.immobiliare.it/de/annunci/128951952/"
@@ -448,6 +455,16 @@ def test_direct_tier_is_held_off_only_after_every_identity_was_refused(ladder):
     assert F._proxy() == "http://fallback.example:1"                       # all three refused
     assert F.current_profile() == "chrome"                                 # the ladder wrapped
     F._drop_session(blocked=False)                                         # a plain drop changes nothing
+    assert F._proxy() == "http://fallback.example:1"
+
+
+def test_threads_refused_on_one_identity_count_as_one_refusal(ladder):
+    F = ladder
+    for _thread in range(5):                # five threads holding a "chrome" session, all refused
+        _blocked_drop(F, "chrome")
+    assert F._proxy() is None and F.current_profile() == "firefox155"     # two identities still untried
+    _blocked_drop(F, "firefox155")
+    _blocked_drop(F, "chrome146")
     assert F._proxy() == "http://fallback.example:1"
 
 
