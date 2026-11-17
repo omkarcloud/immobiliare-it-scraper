@@ -36,7 +36,13 @@ def immobiliare_it_proxy():
     return os.environ.get("IMMOBILIARE_IT_PROXY") or None
 
 
-def immobiliare_it_fallback_proxy():
+def immobiliare_it_fallback_proxy(*args, **kwargs):
     """The proxy new sessions take while your own connection is held off
     (None = keep retrying direct)."""
     return os.environ.get("IMMOBILIARE_IT_FALLBACK_PROXY") or None
+
+
+# ---- added by the sync: defaults for a direct run ----
+def gateway_exit(exit=None):
+    return None
+

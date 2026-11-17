@@ -22,12 +22,14 @@ Milan, Milan in English, Centro, Duomo, a street, Pomezia, a dead slug) and
 the price-history JSON (Milan sale / rent, Centro, Duomo, Italy, Lombardy
 rent, Milan province, an unknown place, a bad contract).
 """
-import html as html_lib
 import re
 from datetime import datetime, timezone
 
 import fastjson
 from immobiliare_it import refs
+from scraper_utils.values import num as _float, to_int as _int
+from scraper_utils.text import plain as _clean
+from scraper_utils.dates import epoch_utc as _iso_datetime
 
 CURRENCY = "EUR"
 
@@ -45,34 +47,6 @@ _PAGE_DETAIL = "/[lang]/listing-detail/[id]"
 
 
 # ---- value helpers -----------------------------------------------------------------
-
-def _clean(value):
-    """Text -> stripped, HTML-unescaped, tag-free string or None."""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        value = str(value)
-    value = html_lib.unescape(_TAG_RE.sub("", value))
-    value = " ".join(value.split())
-    return value or None
-
-
-def _int(value):
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    text = str(value).strip()
-    return int(text) if re.fullmatch(r"-?\d+", text) else None
-
-
-def _float(value):
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _number_in(text):
@@ -106,16 +80,6 @@ def _iso_date(epoch):
         return None
     try:
         return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
-    except (OverflowError, OSError, ValueError):
-        return None
-
-
-def _iso_datetime(epoch):
-    epoch = _int(epoch)
-    if not epoch:
-        return None
-    try:
-        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except (OverflowError, OSError, ValueError):
         return None
 

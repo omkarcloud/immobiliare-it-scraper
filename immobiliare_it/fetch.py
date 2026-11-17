@@ -3,7 +3,12 @@ rotated over a ladder of identities (IMPERSONATE_LADDER). No browser, no
 login, no cookies kept across sessions. Egress: one sticky exit per thread
 session (config.immobiliare_it_proxy(), knob IMMOBILIARE_IT_EXIT — the
 pod's own IP); a retryable failure drops the session, so the retry rides a
-fresh session (and, on a proxy tier, a fresh exit).
+fresh session (and, on a proxy tier, a fresh exit). Once every identity was
+refused on the pod's IP, new sessions ride IMMOBILIARE_IT_FALLBACK_EXIT for
+IMMOBILIARE_IT_BLOCK_HOLD_S: the shared gateway exit since 2026-11-11 (the
+site sees the gateway's TLS there, so the identity ladder does not apply and a
+gateway block does not move it), with a datacenter exit as the last retry
+of a call the gateway also failed.
 
 DataDome fronts www.immobiliare.it (research 2026-11-07 and 2026-11-10,
 curl_cffi on the Mac's own IP, on Italian residential and US / Italian
@@ -92,6 +97,8 @@ import egress
 import fastjson
 from scraper_errors import BadRequest, Blocked, NotFound, UpstreamError
 from immobiliare_it import refs
+from scraper_utils.pages import page_title
+from scraper_utils import sessions
 
 # The curl_cffi identities a session may wear, in the order tried: the
 # ones DataDome served 35/35 back to back on 2026-11-10 first, the one it
@@ -165,8 +172,11 @@ def _rotate_profile(failed):
 
 def _proxy():
     """The exit for a new session: the knob's tier, or the fallback exit
-    while the direct tier is being held off (every identity refused there
-    within IMMOBILIARE_IT_BLOCK_HOLD_S)."""
+    (the gateway exit) while the direct tier is being held off (every
+    identity refused there within IMMOBILIARE_IT_BLOCK_HOLD_S); a datacenter
+    exit for the last retry of a call the gateway failed (_retrying)."""
+    if getattr(_local, "last_resort", False):
+        return config.immobiliare_it_fallback_proxy(last=True)
     proxy = config.immobiliare_it_proxy()
     if proxy is None and time.monotonic() < _blocked_until:
         return config.immobiliare_it_fallback_proxy()
@@ -176,16 +186,15 @@ def _proxy():
 def _session():
     sess = getattr(_local, "session", None)
     if sess is None:
-        from curl_cffi import requests as curl_requests
         profile = current_profile()
-        sess = curl_requests.Session(impersonate=profile)
         proxy = _proxy()
-        if proxy:
-            sess.proxies = {"http": proxy, "https": proxy}
+        sess = egress.new_session(proxy, impersonate=profile)     # None, a proxy URL, or the gateway exit ("gateway")
         sess.headers["accept-language"] = egress.accept_language(proxy)
         _local.session = sess
         _local.proxy = proxy
-        _local.profile = profile
+        # Through the gateway the site sees the gateway's TLS, not this identity's: a
+        # block there says nothing about the identity, so it must not move the ladder.
+        _local.profile = None if config.gateway_exit(proxy) else profile
     return sess
 
 
@@ -202,11 +211,7 @@ def _drop_session(blocked=False):
     _local.session = None
     _local.proxy = None
     _local.profile = None
-    if sess is not None:
-        try:
-            sess.close()
-        except Exception:
-            pass
+    sessions.close_quietly(sess)
     if not blocked:
         return
     if profile:
@@ -226,24 +231,30 @@ def _drop_session(blocked=False):
 def _retrying(fn):
     """Run fn() under the shared retry policy (ImmobiliareItUpstreamError
     only; NotFound / BadRequest surface immediately). Each retry drops the
-    session, so it leaves through a fresh sticky exit."""
+    session, so it leaves through a fresh sticky exit. When the attempt
+    before the last one failed on the gateway exit (the fallback tier), the
+    last retry rides a datacenter exit: a gateway problem degrades to the
+    pre-2026-11-11 behaviour instead of failing the call."""
     last = None
-    for attempt in range(1, config.MAX_RETRIES + 1):
-        try:
-            return fn()
-        except ImmobiliareItUpstreamError as e:
-            last = e
-            _drop_session(blocked=isinstance(e, ImmobiliareItBlocked))
-            if attempt < config.MAX_RETRIES:
-                time.sleep(config.RETRY_BACKOFF * attempt)
-    raise last
+    try:
+        for attempt in range(1, config.MAX_RETRIES + 1):
+            try:
+                return fn()
+            except ImmobiliareItUpstreamError as e:
+                last = e
+                on_gateway = bool(config.gateway_exit(getattr(_local, "proxy", None)))
+                _drop_session(blocked=isinstance(e, ImmobiliareItBlocked))
+                if attempt < config.MAX_RETRIES:
+                    _local.last_resort = on_gateway and attempt + 1 == config.MAX_RETRIES     # the session _session() builds next
+                    time.sleep(config.RETRY_BACKOFF * attempt)
+        raise last
+    finally:
+        if getattr(_local, "last_resort", False):
+            _local.last_resort = False
+            _drop_session()         # the next call starts on the tier of the moment again
 
 
 # ---- classification ------------------------------------------------------------
-
-def page_title(text):
-    match = _TITLE_RE.search(text or "")
-    return match.group(1).strip() if match else ""
 
 
 def is_datadome(text):

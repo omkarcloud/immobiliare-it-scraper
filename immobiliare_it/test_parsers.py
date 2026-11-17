@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from immobiliare_it import parsers as P, refs  # noqa: E402
 from immobiliare_it import fetch as F  # noqa: E402
+from scraper_utils.testing import hosted_only
 
 FX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -481,3 +482,105 @@ def test_no_fallback_exit_means_no_hold(ladder, monkeypatch):
     for profile in ("chrome", "firefox155", "chrome146"):
         _blocked_drop(F, profile)
     assert F._proxy() is None and F._blocked_until == 0.0
+
+
+# ---- the fallback tier: own IP -> gateway exit -> datacenter (2026-11-11) ---------------------
+
+class _Resp:
+    def __init__(self, status=200, text="{}"):
+        self.status_code, self.text = status, text
+
+
+class _Sess:
+    """A session stand-in: scripted responses, closed on drop."""
+
+    def __init__(self, exit_, responses):
+        self.exit, self.responses, self.headers, self.closed = exit_, responses, {}, False
+
+    def get(self, url, **kwargs):
+        return self.responses.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def tiers(ladder, monkeypatch):
+    """The real knobs (own IP, gateway fallback) with scripted sessions:
+    `tiers.script({exit: [response, ...]})`; `tiers.built` lists the exit and
+    identity of every session built."""
+    F = ladder
+    monkeypatch.undo()
+    monkeypatch.setattr(F, "_PROFILES", ["chrome", "firefox155"])
+    monkeypatch.setattr(F, "_profile_index", 0)
+    monkeypatch.setattr(F, "_blocked_until", 0.0)
+    monkeypatch.setattr(F, "_direct_blocks", [])
+    monkeypatch.setattr(F.config, "IMMOBILIARE_IT_EXIT", "direct")
+    monkeypatch.setattr(F.config, "IMMOBILIARE_IT_FALLBACK_EXIT", "gateway")
+    monkeypatch.setattr(F.config, "datacenter_proxy", lambda *a, **k: "http://dc.example:823")
+    monkeypatch.setattr(F.config, "MAX_RETRIES", 3)
+    monkeypatch.setattr(F.time, "sleep", lambda s: None)
+    scripted, built = {}, []
+
+    def new_session(exit_, impersonate="chrome", **kw):
+        built.append((exit_, impersonate))
+        return _Sess(exit_, scripted.setdefault(exit_, []))
+
+    monkeypatch.setattr(F.egress, "new_session", new_session)
+    F._local.__dict__.clear()
+    F.script = lambda by_exit: scripted.update(by_exit)
+    F.built = built
+    yield F
+    F._local.__dict__.clear()
+
+
+@hosted_only
+def test_fallback_knob_is_the_gateway_and_the_last_retry_a_datacenter_exit(tiers):
+    F = tiers
+    assert F.config.immobiliare_it_proxy() is None
+    assert F.config.immobiliare_it_fallback_proxy() == "gateway"
+    assert F.config.immobiliare_it_fallback_proxy(last=True) == "http://dc.example:823"
+
+
+@hosted_only
+def test_every_identity_refused_on_the_own_ip_moves_new_sessions_to_the_gateway(tiers):
+    F = tiers
+    F.script({None: [_Resp(403, "denied"), _Resp(403, "denied")], "gateway": [_Resp(200, '{"count": 5}')]})
+    assert F.fetch_count({"idContratto": 1}) == {"count": 5}
+    assert F.built == [(None, "chrome"), (None, "firefox155"), ("gateway", "chrome")]
+    assert F._proxy() == "gateway"                         # the hold: new sessions ride the gateway
+
+
+@hosted_only
+def test_a_gateway_block_keeps_the_ladder_and_degrades_to_a_datacenter_exit(tiers):
+    F = tiers
+    F._blocked_until = F.time.monotonic() + 600        # the own IP is held off
+    F.script({"gateway": [_Resp(403, "denied"), _Resp(200, '<html><script src="https://ct.captcha-delivery.com/c.js">')],
+              "http://dc.example:823": [_Resp(200, '{"count": 7}')]})
+    assert F.fetch_count({"idContratto": 1}) == {"count": 7}
+    assert [exit_ for exit_, _ in F.built] == ["gateway", "gateway", "http://dc.example:823"]
+    assert F.current_profile() == "chrome"             # the gateway's TLS was refused, not an identity: the ladder stays
+    assert not getattr(F._local, "last_resort", False) and F._local.session is None
+    assert F._proxy() == "gateway"                         # the next call starts on the gateway again
+
+
+@hosted_only
+def test_a_call_the_gateway_and_the_datacenter_exit_fail_ends_blocked(tiers):
+    F = tiers
+    F._blocked_until = F.time.monotonic() + 600
+    F.script({"gateway": [_Resp(403), _Resp(403)], "http://dc.example:823": [_Resp(403)]})
+    with pytest.raises(F.ImmobiliareItBlocked):
+        F.fetch_count({"idContratto": 1})
+    assert [exit_ for exit_, _ in F.built] == ["gateway", "gateway", "http://dc.example:823"]     # three attempts, then it ends
+    assert F.current_profile() == "firefox155"         # only the datacenter refusal moved the ladder
+    assert not getattr(F._local, "last_resort", False)
+
+
+@hosted_only
+def test_with_a_datacenter_fallback_nothing_changes(tiers, monkeypatch):
+    F = tiers
+    monkeypatch.setattr(F.config, "IMMOBILIARE_IT_FALLBACK_EXIT", "datacenter")
+    F._blocked_until = F.time.monotonic() + 600
+    F.script({"http://dc.example:823": [_Resp(403), _Resp(403), _Resp(200, '{"count": 1}')]})
+    assert F.fetch_count({"idContratto": 1}) == {"count": 1}
+    assert [exit_ for exit_, _ in F.built] == ["http://dc.example:823"] * 3
